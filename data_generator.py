@@ -1,228 +1,247 @@
+#!/usr/bin/env python3
+"""
+Coherent Business Events Generator v3.0
+Generates realistic, coherent, and configurable collections of canonical business events.
+"""
+
 import json
-import random
 import uuid
 import hashlib
+import random
+import argparse
+import logging
 from datetime import datetime, timezone, timedelta
 from faker import Faker
 
+# --- Basic Configuration ---
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 fake = Faker()
 
-# --- Reusable Component Generators ---
+class BusinessEventGenerator:
+    """Main generator for coherent business event collections."""
 
-def generate_qty():
-    """Generates a quantity object with a random value and unit of measure."""
-    return {
-        "value": f"{random.uniform(1, 1000):.2f}",
-        "uom": random.choice(['EA', 'KG', 'L', 'M', 'TON'])
-    }
-
-def generate_incoterms():
-    """Generates an incoterms object."""
-    return {
-        "code": random.choice(['FOB', 'CIF', 'EXW', 'DDP']),
-        "location": fake.city()
-    }
-
-def generate_address_payload_data():
-    """Generates a dictionary of address data."""
-    return {
-        "street": fake.street_address(),
-        "city": fake.city(),
-        "state": fake.state_abbr(),
-        "zip_code": fake.zipcode(),
-        "country": fake.country_code()
-    }
-
-# --- Payload Generators for each Entity Type ---
-
-def generate_po_payload(is_sto=False):
-    """Generates a realistic Purchase Order (PO) payload."""
-    header = {
-        "po_number": fake.bothify(text='PO#######'),
-        "company_code": fake.bothify(text='C###'),
-        "purchasing_group": fake.bothify(text='PG#'),
-        "order_type": "STO" if is_sto else "NB",
-        "vendor_id": str(fake.random_number(digits=6)),
-        "incoterms": generate_incoterms(),
-        "document_date": fake.iso8601(),
-        "created_at": fake.iso8601(),
-        "changed_at": fake.iso8601(),
-        "created_by": fake.user_name(),
-        "ship_from_partner": {
-            "vendor_id": str(fake.random_number(digits=6))
-        },
-        "is_sto": is_sto
-    }
-    lines = []
-    for i in range(random.randint(1, 5)):
-        line_id = str((i + 1) * 10)
-        line = {
-            "line_id": line_id,
-            "item_no": line_id,
-            "material_id": str(fake.random_number(digits=8)),
-            "plant_id": fake.bothify(text='PL##'),
-            "quantity": generate_qty(),
-            "weight_net": generate_qty(),
-            "volume": generate_qty(),
-            "hs_code": str(fake.random_number(digits=6)),
-            "changed_at": fake.iso8601(),
-            "line_hash": hashlib.sha256(str(uuid.uuid4()).encode()).hexdigest()
+    def __init__(self):
+        self.generated_entities = {
+            'companies': {}, 'plants': {}, 'vendors': {}, 'customers': {},
+            'materials': {}, 'addresses': {}, 'emails': {},
+            'purchase_orders': {}, 'sales_orders': {}, 'stock_transfer_orders': {}
         }
-        lines.append(line)
-
-    return {"header": header, "lines": lines}
-
-def generate_so_payload():
-    """Generates a Sales Order (SO) payload, leveraging the PO structure."""
-    so_payload = generate_po_payload()
-    so_payload['header']['po_number'] = fake.bothify(text='SO#######')
-    so_payload['header']['order_type'] = 'OR'
-    # In a real SO, we'd have a customer_id instead of vendor_id,
-    # but we are adhering to the provided schema which reuses the PO definition.
-    return so_payload
-
-def generate_sto_payload():
-    """Generates a Stock Transport Order (STO) payload."""
-    return generate_po_payload(is_sto=True)
-
-def generate_gr_payload():
-    """Generates a Goods Receipt (GR) payload."""
-    header = {
-        "gr_reference": {
-            "po_number": fake.bothify(text='PO#######')
-        },
-        "posting_date": fake.iso8601(),
-        "plant_id": fake.bothify(text='PL##'),
-        "created_at": fake.iso8601(),
-        "changed_at": fake.iso8601()
-    }
-    lines = []
-    for i in range(random.randint(1, 3)):
-        line = {
-            "line_id": str((i + 1) * 10),
-            "po_item_no": str((i + 1) * 10),
-            "quantity": generate_qty(),
-            "movement_type": "101",
-            "batch": fake.bothify(text='BATCH-###???'),
-            "storage_location": fake.bothify(text='SL##'),
-            "line_hash": hashlib.sha256(str(uuid.uuid4()).encode()).hexdigest()
+        self.event_sequence = 0
+        self.base_timestamp = datetime.now(timezone.utc) - timedelta(days=90)
+        self.ref_data = {
+            'order_types': ['NB', 'UB', 'ZNB', 'KB', 'LP'],
+            'movement_types': ['101', '102', '161', '261', '301'],
+            'incoterms': ['FOB', 'CIF', 'EXW', 'DDP']
         }
-        lines.append(line)
-    return {"header": header, "lines": lines}
 
-def generate_master_data_payload(entity_type):
-    """
-    Generates a master data payload (customer, vendor, etc.).
-    The schema for these is identical, so we generate specific data based on type.
-    Note: The schema specifies 'customer_id' for all these types, so we use
-    that as the key, even though the logical ID might be a vendor_id, etc.
-    """
-    name = ""
-    if entity_type == 'customer':
-        name = fake.company()
-    elif entity_type == 'vendor':
-        name = fake.company() + " " + fake.company_suffix()
-    elif entity_type == 'material':
-        name = f"{fake.color_name().capitalize()} {fake.word().capitalize()}"
-    elif entity_type == 'company':
-        name = fake.company()
-    elif entity_type == 'plant':
-        name = f"{fake.city()} Plant"
-    elif entity_type == 'address':
-        name = f"Address for {fake.company()}"
-    elif entity_type == 'email':
-        name = fake.name()
+    def _get_sequential_timestamp(self) -> datetime:
+        self.event_sequence += 1
+        return self.base_timestamp + timedelta(minutes=self.event_sequence)
 
-    header = {
-        "customer_id": str(fake.random_number(digits=7)),
-        "name": name,
-        "country": fake.country_code(),
-        "changed_at": fake.iso8601()
-    }
+    def _generate_hash(self, content: dict) -> str:
+        return hashlib.sha256(json.dumps(content, sort_keys=True).encode()).hexdigest()
 
-    # Add more specific fields based on entity type
-    if entity_type in ['customer', 'vendor']:
-        header["trading_partner"] = str(fake.random_number(digits=6))
-        header["incoterms"] = generate_incoterms()
-        header["address"] = generate_address_payload_data()
-        header["emails"] = [{"email": fake.email()} for _ in range(random.randint(1, 2))]
-    elif entity_type == 'address':
-         header["address"] = generate_address_payload_data()
-    elif entity_type == 'email':
-        header["emails"] = [{"email": fake.email()}]
+    def _create_canonical_event(self, entity_type: str, event_type: str, payload: dict) -> dict:
+        ts_event = self._get_sequential_timestamp()
+        header_data = {
+            "event_type": event_type, "entity_type": entity_type, "schema_version": "1.0",
+            "source_system": "SAP_S4HANA_2023", "sysid": "S4H", "mandt": "100",
+            "ts_event": ts_event.isoformat(), "idempotency_key": str(uuid.uuid4()),
+        }
+        return {
+            **header_data, "event_id": str(uuid.uuid4()), "correlation_id": str(uuid.uuid4()),
+            "ts_ingest": (ts_event + timedelta(seconds=random.randint(1, 60))).isoformat(),
+            "line_scope": "full", "lines_removed": [], "payload": payload,
+            "header_hash": self._generate_hash(header_data),
+            "manifest": {"generator": "CoherentEventGenerator/v3.0"}
+        }
 
-    return {
-        "header": header,
-        "record_hash": hashlib.sha256(str(uuid.uuid4()).encode()).hexdigest()
-    }
+    def _generate_qty(self):
+        return {"value": f"{random.uniform(1, 1000):.2f}", "uom": random.choice(['EA', 'KG', 'L', 'M'])}
 
-# --- Main Event Generator ---
+    def _generate_incoterms(self):
+        return {"code": random.choice(self.ref_data['incoterms']), "location": fake.city()}
 
-PAYLOAD_GENERATORS = {
-    "po": generate_po_payload,
-    "so": generate_so_payload,
-    "sto": generate_sto_payload,
-    "gr": generate_gr_payload,
-    "customer": lambda: generate_master_data_payload("customer"),
-    "vendor": lambda: generate_master_data_payload("vendor"),
-    "material": lambda: generate_master_data_payload("material"),
-    "company": lambda: generate_master_data_payload("company"),
-    "plant": lambda: generate_master_data_payload("plant"),
-    "address": lambda: generate_master_data_payload("address"),
-    "email": lambda: generate_master_data_payload("email"),
-}
+    # --- Master Data Generators ---
 
-def generate_event(entity_type):
-    """
-    Creates a comprehensive, realistic canonical business event.
-    """
-    if entity_type not in PAYLOAD_GENERATORS:
-        raise ValueError(f"Unknown entity_type: {entity_type}")
+    def generate_vendor(self):
+        vendor_id = str(fake.random_number(digits=6, fix_len=True))
+        payload = {"header": {
+                "vendor_id": vendor_id, "name": fake.company(), "country": fake.country_code(),
+                "incoterms": self._generate_incoterms(),
+                "address": {"street": fake.street_address(), "city": fake.city(), "country": fake.country_code()},
+                "emails": [{"email": fake.email()}],
+                "changed_at": self._get_sequential_timestamp().isoformat()
+            }, "record_hash": self._generate_hash({"id": vendor_id})
+        }
+        event = self._create_canonical_event('vendor', 'created', payload)
+        self.generated_entities['vendors'][vendor_id] = payload
+        return event
 
-    ts_event = datetime.now(timezone.utc)
-    ts_ingest = ts_event + timedelta(seconds=random.randint(1, 60))
+    def generate_material(self):
+        material_id = str(fake.random_number(digits=8, fix_len=True))
+        payload = {"header": {
+                "material_id": material_id, "name": f"{fake.color_name().capitalize()} {fake.word()}",
+                "country": fake.country_code(), "changed_at": self._get_sequential_timestamp().isoformat()
+            }, "record_hash": self._generate_hash({"id": material_id})
+        }
+        event = self._create_canonical_event('material', 'created', payload)
+        self.generated_entities['materials'][material_id] = payload
+        return event
 
-    payload = PAYLOAD_GENERATORS[entity_type]()
+    # --- Transactional Data Generators ---
 
-    header_data = {
-        "event_type": random.choice(['created', 'updated']),
-        "entity_type": entity_type,
-        "schema_version": "1.0",
-        "source_system": "SAP_S4HANA_2023",
-        "sysid": "S4H",
-        "mandt": "100",
-        "ts_event": ts_event.isoformat(),
-        "idempotency_key": str(uuid.uuid4()),
-    }
+    def _generate_order_lines(self, plant_id, order_id):
+        lines = []
+        for i in range(random.randint(1, 5)):
+            line_id = str((i + 1) * 10)
+            material_id = random.choice(list(self.generated_entities['materials'].keys()))
+            lines.append({
+                "line_id": line_id, "item_no": line_id, "material_id": material_id, "plant_id": plant_id,
+                "quantity": self._generate_qty(), "weight_net": self._generate_qty(),
+                "volume": self._generate_qty(), "hs_code": str(fake.random_number(digits=6)),
+                "changed_at": self._get_sequential_timestamp().isoformat(),
+                "line_hash": self._generate_hash({"id": f"{order_id}-{line_id}"})
+            })
+        return lines
 
-    # Create a hash of the header for the header_hash field
-    header_for_hash = json.dumps(header_data, sort_keys=True).encode()
-    header_hash = hashlib.sha256(header_for_hash).hexdigest()
+    def generate_purchase_order(self, is_sto=False):
+        entity_type = 'sto' if is_sto else 'po'
+        order_key = 'stock_transfer_orders' if is_sto else 'purchase_orders'
 
-    event = {
-        **header_data,
-        "event_id": str(uuid.uuid4()),
-        "correlation_id": str(uuid.uuid4()),
-        "ts_ingest": ts_ingest.isoformat(),
-        "line_scope": "full",
-        "lines_removed": [],
-        "payload": payload,
-        "header_hash": header_hash,
-        "manifest": {}
-    }
+        vendor_id = random.choice(list(self.generated_entities['vendors'].keys()))
+        plant_id = fake.bothify(text='PL##') # Assume plants are just codes for now
+        company_code = fake.bothify(text='C###')
+        po_number = fake.bothify(text='PO#######')
 
-    return event
+        lines = self._generate_order_lines(plant_id, po_number)
 
-# --- Main Execution Block ---
+        payload = {"header": {
+                "po_number": po_number, "company_code": company_code,
+                "order_type": "UB" if is_sto else random.choice(self.ref_data['order_types']),
+                "vendor_id": vendor_id, "is_sto": is_sto,
+                "document_date": self._get_sequential_timestamp().isoformat(),
+                "created_at": self._get_sequential_timestamp().isoformat(),
+                "created_by": fake.user_name()
+            }, "lines": lines
+        }
+        event = self._create_canonical_event(entity_type, 'created', payload)
+        self.generated_entities[order_key][po_number] = payload
+        return event
+
+    def generate_sales_order(self):
+        # For simplicity, re-using vendors as customers, but could be separate
+        customer_id = random.choice(list(self.generated_entities['vendors'].keys()))
+        plant_id = fake.bothify(text='PL##')
+        company_code = fake.bothify(text='C###')
+        so_number = fake.bothify(text='SO#######')
+
+        lines = self._generate_order_lines(plant_id, so_number)
+
+        payload = {"header": {
+                # Adhering to schema where SO reuses PO structure
+                "po_number": so_number, "company_code": company_code, "order_type": "OR",
+                "vendor_id": customer_id, # Schema uses vendor_id for customer
+                "created_at": self._get_sequential_timestamp().isoformat(),
+                "created_by": fake.user_name()
+            }, "lines": lines
+        }
+        event = self._create_canonical_event('so', 'created', payload)
+        self.generated_entities['sales_orders'][so_number] = payload
+        return event
+
+    def generate_goods_receipt(self):
+        if not self.generated_entities['purchase_orders']: return None
+        po_number = random.choice(list(self.generated_entities['purchase_orders'].keys()))
+        po_payload = self.generated_entities['purchase_orders'][po_number]
+
+        lines = []
+        for po_line in po_payload['lines']:
+            received_qty_val = float(po_line['quantity']['value']) * random.uniform(0.8, 1.0)
+            lines.append({
+                "line_id": str(uuid.uuid4()), "po_item_no": po_line['item_no'],
+                "quantity": {"value": f"{received_qty_val:.2f}", "uom": po_line['quantity']['uom']},
+                "movement_type": random.choice(self.ref_data['movement_types']),
+                "line_hash": self._generate_hash({"id": f"gr-{po_number}-{po_line['item_no']}"})
+            })
+
+        payload = {"header": {
+                "gr_reference": {"po_number": po_number},
+                "posting_date": self._get_sequential_timestamp().isoformat(),
+                "plant_id": po_payload['lines'][0]['plant_id'],
+                "created_at": self._get_sequential_timestamp().isoformat()
+            }, "lines": lines
+        }
+        return self._create_canonical_event('gr', 'created', payload)
+
+    # --- Orchestrator ---
+
+    def generate_coherent_collection(self, config: dict) -> list:
+        events = []
+        logger.info("Starting coherent event generation...")
+
+        # Step 1: Generate Master Data
+        for _ in range(config.get('vendors')): events.append(self.generate_vendor())
+        for _ in range(config.get('materials')): events.append(self.generate_material())
+        logger.info(f"Generated {len(events)} master data events.")
+
+        # Step 2: Generate Transactional Data
+        for _ in range(config.get('purchase_orders')): events.append(self.generate_purchase_order(is_sto=False))
+        for _ in range(config.get('stock_transfer_orders')): events.append(self.generate_purchase_order(is_sto=True))
+        for _ in range(config.get('sales_orders')): events.append(self.generate_sales_order())
+
+        gr_count = min(config.get('goods_receipts'), len(self.generated_entities['purchase_orders']))
+        for _ in range(gr_count):
+            gr_event = self.generate_goods_receipt()
+            if gr_event: events.append(gr_event)
+
+        logger.info(f"Generated {len(events) - config.get('vendors') - config.get('materials')} transactional events.")
+
+        # Step 3: Generate Update Events
+        update_count = int(len(events) * 0.1) # 10% update events
+        for _ in range(update_count):
+            if not events: break
+            original_event = random.choice(events)
+            update_event = dict(original_event)
+            update_event['event_type'] = 'updated'
+            update_event['event_id'] = str(uuid.uuid4())
+            update_event['ts_event'] = self._get_sequential_timestamp().isoformat()
+            events.append(update_event)
+        logger.info(f"Generated {update_count} update events.")
+
+        logger.info(f"Total events generated: {len(events)}")
+        return events
+
+def main():
+    parser = argparse.ArgumentParser(description='Generate coherent business event collections.')
+    parser.add_argument('--output', '-o', default='coherent_events.json')
+    parser.add_argument('--vendors', type=int, default=10)
+    parser.add_argument('--materials', type=int, default=20)
+    parser.add_argument('--purchase-orders', type=int, default=15)
+    parser.add_argument('--sales-orders', type=int, default=12)
+    parser.add_argument('--stock-transfer-orders', type=int, default=5)
+    parser.add_argument('--goods-receipts', type=int, default=8)
+    parser.add_argument('--pretty', action='store_true')
+    parser.add_argument('--seed', type=int)
+
+    args = parser.parse_args()
+
+    if args.seed:
+        random.seed(args.seed)
+        Faker.seed(args.seed)
+        logger.info(f"Using random seed: {args.seed}")
+
+    config = vars(args)
+
+    generator = BusinessEventGenerator()
+    events = generator.generate_coherent_collection(config)
+
+    with open(args.output, 'w') as f:
+        indent = 2 if args.pretty else None
+        json.dump(events, f, indent=indent)
+
+    logger.info(f"Successfully saved {len(events)} events to {args.output}")
 
 if __name__ == "__main__":
-    entity_types = [
-        "po", "so", "sto", "gr", "customer", "vendor",
-        "material", "company", "plant", "address", "email"
-    ]
-
-    print("Generating one sample event for each entity type:")
-    for entity_type in entity_types:
-        print(f"\n--- Generating '{entity_type}' event ---")
-        business_event = generate_event(entity_type)
-        print(json.dumps(business_event, indent=2))
+    main()
